@@ -1,7 +1,7 @@
 variable "agent_image" {
   type        = string
   default     = "hashicorp/tfc-agent"
-  description = "Container image of the HCP Terraform agent, without tag."
+  description = "Container image of the HCP Terraform agent, without tag. When `ecr_pull_through_cache` is enabled, this is the Docker Hub repository to cache."
 }
 
 variable "agent_image_tag" {
@@ -70,6 +70,32 @@ variable "desired_count" {
   validation {
     condition     = var.desired_count >= 1
     error_message = "At least one agent task must run."
+  }
+}
+
+variable "ecr_pull_through_cache" {
+  type = object({
+    enabled               = optional(bool, false)
+    credential_arn        = optional(string)
+    ecr_repository_prefix = optional(string)
+    image_count           = optional(number, 10)
+  })
+  default     = {}
+  description = "Pull the agent image through an ECR pull through cache for Docker Hub instead of directly from Docker Hub. `credential_arn` is the ARN of a Secrets Manager secret, prefixed with `ecr-pullthroughcache/`, holding Docker Hub credentials. `ecr_repository_prefix` defaults to `name`; `image_count` is the number of cached images to keep."
+
+  validation {
+    condition     = !var.ecr_pull_through_cache.enabled || can(regex("^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:ecr-pullthroughcache/", var.ecr_pull_through_cache.credential_arn))
+    error_message = "When enabled, credential_arn must be the ARN of a Secrets Manager secret whose name starts with \"ecr-pullthroughcache/\"."
+  }
+
+  validation {
+    condition     = var.ecr_pull_through_cache.ecr_repository_prefix == null || can(regex("^[a-z0-9][a-z0-9._/-]{1,29}$", var.ecr_pull_through_cache.ecr_repository_prefix))
+    error_message = "ecr_repository_prefix must be 2-30 lowercase characters: letters, numbers, \".\", \"_\", \"-\" or \"/\"."
+  }
+
+  validation {
+    condition     = var.ecr_pull_through_cache.image_count >= 1
+    error_message = "image_count must be at least 1."
   }
 }
 

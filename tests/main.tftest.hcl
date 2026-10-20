@@ -28,6 +28,16 @@ mock_provider "aws" {
     }
   }
 
+  # Known during plan so the resulting agent image can be asserted.
+  mock_resource "aws_ecr_repository" {
+    override_during = plan
+
+    defaults = {
+      arn            = "arn:aws:ecr:eu-central-1:123456789012:repository/tfc-agent/hashicorp/tfc-agent"
+      repository_url = "123456789012.dkr.ecr.eu-central-1.amazonaws.com/tfc-agent/hashicorp/tfc-agent"
+    }
+  }
+
   mock_resource "aws_ssm_parameter" {
     defaults = {
       arn = "arn:aws:ssm:eu-central-1:123456789012:parameter/tfc-agent/token"
@@ -76,6 +86,99 @@ run "default" {
     }
     error_message = "Unexpected default agent environment"
   }
+
+  assert {
+    condition     = length(aws_ecr_pull_through_cache_rule.default) == 0 && length(module.ecr) == 0
+    error_message = "No ECR pull through cache should be created by default"
+  }
+
+  assert {
+    condition     = local.image == "hashicorp/tfc-agent:1.28"
+    error_message = "Agent image should be pulled from Docker Hub by default"
+  }
+}
+
+run "ecr_pull_through_cache" {
+  command = plan
+
+  variables {
+    ecr_pull_through_cache = {
+      enabled        = true
+      credential_arn = "arn:aws:secretsmanager:eu-central-1:123456789012:secret:ecr-pullthroughcache/docker-hub-AbCdEf"
+    }
+  }
+
+  assert {
+    condition     = aws_ecr_pull_through_cache_rule.default[0].ecr_repository_prefix == "tfc-agent" && aws_ecr_pull_through_cache_rule.default[0].upstream_registry_url == "registry-1.docker.io"
+    error_message = "Pull through cache rule for Docker Hub should use the module name as prefix"
+  }
+
+  assert {
+    condition     = length(module.ecr) == 1 && local.ecr_repository_name == "tfc-agent/hashicorp/tfc-agent"
+    error_message = "Cache repository should match the pull through cache path"
+  }
+
+  assert {
+    condition     = local.image == "123456789012.dkr.ecr.eu-central-1.amazonaws.com/tfc-agent/hashicorp/tfc-agent:1.28"
+    error_message = "Agent image should be pulled from the ECR cache repository"
+  }
+}
+
+run "ecr_pull_through_cache_custom_prefix" {
+  command = plan
+
+  variables {
+    ecr_pull_through_cache = {
+      enabled               = true
+      credential_arn        = "arn:aws:secretsmanager:eu-central-1:123456789012:secret:ecr-pullthroughcache/docker-hub-AbCdEf"
+      ecr_repository_prefix = "docker-hub"
+    }
+  }
+
+  assert {
+    condition     = local.ecr_repository_name == "docker-hub/hashicorp/tfc-agent"
+    error_message = "Cache repository should use the custom prefix"
+  }
+}
+
+run "ecr_pull_through_cache_with_region" {
+  command = plan
+
+  variables {
+    region = "eu-west-1"
+
+    ecr_pull_through_cache = {
+      enabled        = true
+      credential_arn = "arn:aws:secretsmanager:eu-central-1:123456789012:secret:ecr-pullthroughcache/docker-hub-AbCdEf"
+    }
+  }
+
+  expect_failures = [aws_ecr_pull_through_cache_rule.default]
+}
+
+run "ecr_pull_through_cache_without_credential" {
+  command = plan
+
+  variables {
+    ecr_pull_through_cache = {
+      enabled = true
+    }
+  }
+
+  expect_failures = [var.ecr_pull_through_cache]
+}
+
+run "ecr_pull_through_cache_invalid_credential" {
+  command = plan
+
+  variables {
+    ecr_pull_through_cache = {
+      enabled        = true
+      credential_arn = "arn:aws:secretsmanager:eu-central-1:123456789012:secret:docker-hub-AbCdEf"
+    }
+  }
+
+  expect_failures = [var.ecr_pull_through_cache]
 }
 
 run "existing_kms_key" {

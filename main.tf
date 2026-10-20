@@ -9,6 +9,12 @@ locals {
   # Created by the mcaf-fargate module; needed upfront in the KMS key policy.
   log_group_name = "/ecs/${var.name}"
 
+  ecr_pull_through_cache_enabled = var.ecr_pull_through_cache.enabled
+  ecr_repository_prefix          = coalesce(var.ecr_pull_through_cache.ecr_repository_prefix, var.name)
+  ecr_repository_name            = local.ecr_pull_through_cache_enabled ? "${aws_ecr_pull_through_cache_rule.default[0].ecr_repository_prefix}/${var.agent_image}" : null
+
+  image = "${local.ecr_pull_through_cache_enabled ? module.ecr[0].repository_url[local.ecr_repository_name] : var.agent_image}:${var.agent_image_tag}"
+
   environment = merge(
     {
       TFC_AGENT_AUTO_UPDATE = "disabled"
@@ -133,6 +139,57 @@ module "kms" {
 }
 
 ################################################################################
+# ECR pull through cache for the agent image from Docker Hub
+################################################################################
+
+resource "aws_ecr_pull_through_cache_rule" "default" {
+  count = local.ecr_pull_through_cache_enabled ? 1 : 0
+
+  credential_arn        = var.ecr_pull_through_cache.credential_arn
+  ecr_repository_prefix = local.ecr_repository_prefix
+  upstream_registry_url = "registry-1.docker.io"
+
+  lifecycle {
+    precondition {
+      condition     = var.region == null
+      error_message = "The ECR pull through cache is created in the provider region, as mcaf-ecr does not support the region argument; unset region or use a provider for that region."
+    }
+  }
+}
+
+# Created upfront, rather than by ECR on first pull, so it is KMS encrypted and the agent
+# role does not need ecr:CreateRepository.
+module "ecr" {
+  #checkov:skip=CKV_AWS_51:Pull through cache refreshes cached tags from Docker Hub, which requires mutable tags
+  count = local.ecr_pull_through_cache_enabled ? 1 : 0
+
+  source  = "schubergphilis-ep/mcaf-ecr/aws"
+  version = "~> 2.0.0"
+
+  force_delete         = true # cached images can be pulled again from Docker Hub
+  image_tag_mutability = "MUTABLE"
+  kms_key_arn          = local.kms_key_arn
+  repository_names     = [local.ecr_repository_name]
+  tags                 = var.tags
+
+  custom_lifecycle_policy_rules = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Keep the last ${var.ecr_pull_through_cache.image_count} images"
+        action       = { type = "expire" }
+
+        selection = {
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = var.ecr_pull_through_cache.image_count
+        }
+      }
+    ]
+  })
+}
+
+################################################################################
 # ECS Fargate cluster, service & agent task
 ################################################################################
 
@@ -150,9 +207,20 @@ data "aws_iam_policy_document" "role_policy" {
     actions   = ["kms:Decrypt"]
     resources = [local.kms_key_arn]
   }
+
+  dynamic "statement" {
+    for_each = local.ecr_pull_through_cache_enabled ? [true] : []
+
+    content {
+      sid       = "ImportAgentImage"
+      actions   = ["ecr:BatchImportUpstreamImage"]
+      resources = module.ecr[0].arns
+    }
+  }
 }
 
 module "fargate" {
+  #checkov:skip=CKV_AWS_336:The agent needs a writable root filesystem, see readonly_root_filesystem below
   source  = "schubergphilis/mcaf-fargate/aws"
   version = "~> 3.2.0"
 
@@ -162,7 +230,7 @@ module "fargate" {
   desired_count        = var.desired_count
   ecs_subnet_ids       = var.subnet_ids
   environment          = local.environment
-  image                = "${var.agent_image}:${var.agent_image_tag}"
+  image                = local.image
   kms_key_id           = local.kms_key_arn
   log_retention_days   = var.log_retention_days
   memory               = var.memory

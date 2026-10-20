@@ -12,6 +12,7 @@ Everything lives in the root module:
 - `aws_ssm_parameter` holding the agent token, passed to the container as a secret
 - Optional KMS key via `schubergphilis-ep/mcaf-kms/aws` (skipped when `kms_key_arn` is set); the key policy delegates to IAM and allows CloudWatch Logs for `/ecs/<name>`
 - ECS cluster, service, task definition, IAM role, security group and log group via `schubergphilis/mcaf-fargate/aws`
+- Optional (`ecr_pull_through_cache.enabled`) ECR pull through cache rule for Docker Hub plus a pre-created KMS-encrypted repository `<prefix>/<agent_image>` via `schubergphilis-ep/mcaf-ecr/aws`; the agent role only gets `ecr:BatchImportUpstreamImage`. mcaf-ecr has no `region` input, so a precondition blocks combining the cache with `region`. Its `pull-through-cache` submodule is not used because it relies on repository creation templates (agent would need `ecr:CreateRepository`) and an extra IAM role
 
 Workspace execution mode is intentionally not managed here; callers (e.g. workloads-manager) set `execution_mode = "agent"` with the `agent_pool_id` output.
 

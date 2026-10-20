@@ -8,6 +8,7 @@ The module creates:
 - An SSM `SecureString` parameter holding the agent token.
 - A KMS key encrypting the SSM parameter and CloudWatch log group, unless an existing key is provided.
 - An ECS cluster, service and task definition running the agents, using [mcaf-fargate](https://github.com/schubergphilis/terraform-aws-mcaf-fargate).
+- Optionally, an ECR pull through cache for Docker Hub and a KMS encrypted ECR repository caching the agent image.
 
 ## Usage
 
@@ -49,11 +50,40 @@ The agents run in the private subnets passed in `subnet_ids` and need outbound H
 | Purpose | Destination |
 |---------|-------------|
 | HCP Terraform ([requirements](https://developer.hashicorp.com/terraform/cloud-docs/agents/requirements)) | `app.terraform.io`, `registry.terraform.io`, `releases.hashicorp.com`, `archivist.terraform.io` (443), `agents.terraform.io` (7146) |
-| Container image from Docker Hub | `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com`, `production.cloudfront.docker.com` |
+| Container image from Docker Hub (without ECR pull through cache) | `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com`, `production.cloudfront.docker.com` |
+| Container image from ECR (with ECR pull through cache), unless VPC endpoints are used | `api.ecr.<region>.amazonaws.com`, `<account-id>.dkr.ecr.<region>.amazonaws.com`, `prod-<region>-starport-layer-bucket.s3.<region>.amazonaws.com` |
 | Task startup, unless VPC endpoints are used | `ssm.<region>.amazonaws.com`, `logs.<region>.amazonaws.com` |
 | Terraform runs on the agents | All APIs used by the workspaces' providers, e.g. `sts.<region>.amazonaws.com` |
 
-Fargate does not cache images, and with `agent_single_execution` enabled a new task starts after every run. To avoid Docker Hub pull rate limits, consider mirroring the image to ECR and setting `agent_image`.
+### ECR pull through cache for Docker Hub
+
+Fargate does not cache images, and with `agent_single_execution` enabled a new task starts after every run, which can quickly hit Docker Hub pull rate limits. With `ecr_pull_through_cache` enabled, the module creates an ECR pull through cache rule for Docker Hub and the repository `<ecr_repository_prefix>/<agent_image>`, and the agents pull the image from ECR instead. ECR fetches the image from Docker Hub on the first pull and refreshes cached tags at most once every 24 hours.
+
+Docker Hub requires authentication for pull through caching. Create a Secrets Manager secret whose name starts with `ecr-pullthroughcache/`, containing a Docker Hub username and access token, and pass its ARN:
+
+```json
+{
+  "username": "my-docker-hub-user",
+  "accessToken": "dckr_pat_..."
+}
+```
+
+```hcl
+module "tfc_agent" {
+  source  = "schubergphilis-ep/mcaf-agent/tfe"
+  version = "~> 1.0"
+
+  subnet_ids = data.aws_subnets.private.ids
+  vpc_id     = data.aws_vpc.default.id
+
+  ecr_pull_through_cache = {
+    enabled        = true
+    credential_arn = "arn:aws:secretsmanager:eu-central-1:123456789012:secret:ecr-pullthroughcache/docker-hub-AbCdEf"
+  }
+}
+```
+
+The repository is created with [mcaf-ecr](https://github.com/schubergphilis-ep/terraform-aws-mcaf-ecr), which does not support the `region` argument, so the pull through cache cannot be combined with `region`; use a provider configured for the target region instead. Pull through cache rules are unique per account and region on `ecr_repository_prefix`, which defaults to `name`. Cached tags are refreshed from Docker Hub, so the repository uses mutable tags; pin `agent_image_tag` to a specific version to control which image runs.
 
 ### Security considerations
 
@@ -63,7 +93,7 @@ Fargate does not cache images, and with `agent_single_execution` enabled a new t
 
 ### Using an existing KMS key
 
-When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service to use the key for the `/ecs/<name>` log group, and must allow IAM policies in the account to grant `kms:Decrypt` to the agent role.
+When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service to use the key for the `/ecs/<name>` log group, and must allow IAM policies in the account to grant `kms:Decrypt` to the agent role. With the ECR pull through cache enabled, the role running Terraform also needs `kms:CreateGrant` and `kms:DescribeKey` on the key to create the encrypted ECR repository.
 
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
@@ -71,20 +101,21 @@ When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service
 | Name | Version |
 | ---- | ------- |
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.9 |
-| <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.0 |
+| <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.8 |
 | <a name="requirement_tfe"></a> [tfe](#requirement\_tfe) | >= 0.70 |
 
 ## Providers
 
 | Name | Version |
 | ---- | ------- |
-| <a name="provider_aws"></a> [aws](#provider\_aws) | >= 6.0 |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | >= 6.8 |
 | <a name="provider_tfe"></a> [tfe](#provider\_tfe) | >= 0.70 |
 
 ## Modules
 
 | Name | Source | Version |
 | ---- | ------ | ------- |
+| <a name="module_ecr"></a> [ecr](#module\_ecr) | schubergphilis-ep/mcaf-ecr/aws | ~> 2.0.0 |
 | <a name="module_fargate"></a> [fargate](#module\_fargate) | schubergphilis/mcaf-fargate/aws | ~> 3.2.0 |
 | <a name="module_kms"></a> [kms](#module\_kms) | schubergphilis-ep/mcaf-kms/aws | ~> 3.0.0 |
 
@@ -92,6 +123,7 @@ When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service
 
 | Name | Type |
 | ---- | ---- |
+| [aws_ecr_pull_through_cache_rule.default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ecr_pull_through_cache_rule) | resource |
 | [aws_ssm_parameter.default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ssm_parameter) | resource |
 | [tfe_agent_pool.default](https://registry.terraform.io/providers/hashicorp/tfe/latest/docs/resources/agent_pool) | resource |
 | [tfe_agent_pool_allowed_projects.default](https://registry.terraform.io/providers/hashicorp/tfe/latest/docs/resources/agent_pool_allowed_projects) | resource |
@@ -107,7 +139,7 @@ When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service
 
 | Name | Description | Type | Default | Required |
 | ---- | ----------- | ---- | ------- | :------: |
-| <a name="input_agent_image"></a> [agent\_image](#input\_agent\_image) | Container image of the HCP Terraform agent, without tag. | `string` | `"hashicorp/tfc-agent"` | no |
+| <a name="input_agent_image"></a> [agent\_image](#input\_agent\_image) | Container image of the HCP Terraform agent, without tag. When `ecr_pull_through_cache` is enabled, this is the Docker Hub repository to cache. | `string` | `"hashicorp/tfc-agent"` | no |
 | <a name="input_agent_image_tag"></a> [agent\_image\_tag](#input\_agent\_image\_tag) | Tag of the HCP Terraform agent container image. | `string` | `"1.28"` | no |
 | <a name="input_agent_log_level"></a> [agent\_log\_level](#input\_agent\_log\_level) | Log level of the HCP Terraform agent. | `string` | `"info"` | no |
 | <a name="input_agent_name"></a> [agent\_name](#input\_agent\_name) | Name of the agents as shown in HCP Terraform; defaults to `name`. | `string` | `null` | no |
@@ -117,6 +149,7 @@ When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service
 | <a name="input_architecture"></a> [architecture](#input\_architecture) | Instruction set architecture of the Fargate task. | `string` | `"x86_64"` | no |
 | <a name="input_cpu"></a> [cpu](#input\_cpu) | Fargate CPU units per agent task (1 vCPU = 1024 CPU units). | `number` | `1024` | no |
 | <a name="input_desired_count"></a> [desired\_count](#input\_desired\_count) | Number of agent tasks to run; each agent handles one run at a time. | `number` | `1` | no |
+| <a name="input_ecr_pull_through_cache"></a> [ecr\_pull\_through\_cache](#input\_ecr\_pull\_through\_cache) | Pull the agent image through an ECR pull through cache for Docker Hub instead of directly from Docker Hub. `credential_arn` is the ARN of a Secrets Manager secret, prefixed with `ecr-pullthroughcache/`, holding Docker Hub credentials. `ecr_repository_prefix` defaults to `name`; `image_count` is the number of cached images to keep. | <pre>object({<br/>    enabled               = optional(bool, false)<br/>    credential_arn        = optional(string)<br/>    ecr_repository_prefix = optional(string)<br/>    image_count           = optional(number, 10)<br/>  })</pre> | `{}` | no |
 | <a name="input_environment"></a> [environment](#input\_environment) | Additional environment variables for the agent container, e.g. `TFC_AGENT_*` settings. Overrides the module defaults. | `map(string)` | `{}` | no |
 | <a name="input_kms_key_administrator_arns"></a> [kms\_key\_administrator\_arns](#input\_kms\_key\_administrator\_arns) | IAM ARNs allowed to administer the created KMS key; defaults to the role running Terraform. Only used when `kms_key_arn` is not set. | `list(string)` | `[]` | no |
 | <a name="input_kms_key_arn"></a> [kms\_key\_arn](#input\_kms\_key\_arn) | ARN of an existing KMS key to encrypt the SSM parameter and CloudWatch log group; if null a key is created. | `string` | `null` | no |
@@ -141,6 +174,7 @@ When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service
 | <a name="output_agent_pool_id"></a> [agent\_pool\_id](#output\_agent\_pool\_id) | ID of the HCP Terraform agent pool |
 | <a name="output_agent_pool_name"></a> [agent\_pool\_name](#output\_agent\_pool\_name) | Name of the HCP Terraform agent pool |
 | <a name="output_cluster_arn"></a> [cluster\_arn](#output\_cluster\_arn) | ARN of the ECS cluster |
+| <a name="output_ecr_repository_url"></a> [ecr\_repository\_url](#output\_ecr\_repository\_url) | URL of the ECR repository caching the agent image, if the pull through cache is enabled |
 | <a name="output_ecs_service_arn"></a> [ecs\_service\_arn](#output\_ecs\_service\_arn) | ARN of the ECS service running the agents |
 | <a name="output_kms_key_arn"></a> [kms\_key\_arn](#output\_kms\_key\_arn) | ARN of the KMS key encrypting the agent token and logs |
 | <a name="output_role_arn"></a> [role\_arn](#output\_role\_arn) | ARN of the IAM role used by the agent tasks and the Terraform runs on them |

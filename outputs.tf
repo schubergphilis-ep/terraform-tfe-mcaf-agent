@@ -18,6 +18,11 @@ output "ecs_service_arn" {
   value       = module.fargate.ecs_service_arn
 }
 
+output "ecr_repository_url" {
+  description = "URL of the ECR repository caching the agent image, if the pull through cache is enabled"
+  value       = try(module.ecr[0].repository_url[local.ecr_repository_name], null)
+}
+
 output "kms_key_arn" {
   description = "ARN of the KMS key encrypting the agent token and logs"
   value       = local.kms_key_arn
