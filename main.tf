@@ -20,6 +20,12 @@ locals {
 
   image = "${var.ecr_pull_through_cache.enabled ? local.ecr_repository_url : var.agent_image}:${var.agent_image_tag}"
 
+  # Every AWS resource is tagged with the HCP Terraform organization of the agent pool; when
+  # tfe_organization is null the pool uses the tfe provider organization.
+  tags = merge(var.tags, {
+    tfe-organization = coalesce(var.tfe_organization, tfe_agent_pool.default.organization)
+  })
+
   # A token is only generated and stored when no existing secret is supplied.
   create_agent_token     = var.agent_token_secret_arn == null
   agent_token_secret_arn = local.create_agent_token ? aws_secretsmanager_secret.default[0].arn : var.agent_token_secret_arn
@@ -82,7 +88,7 @@ resource "aws_secretsmanager_secret" "default" {
   description             = "HCP Terraform agent token for the ${local.pool_name} agent pool"
   kms_key_id              = local.kms_key_arn
   recovery_window_in_days = 0
-  tags                    = var.tags
+  tags                    = local.tags
 }
 
 resource "aws_secretsmanager_secret_version" "default" {
@@ -150,7 +156,7 @@ module "kms" {
   name        = var.name
   description = "KMS key used by the ${var.name} HCP Terraform agent"
   region      = var.region
-  tags        = var.tags
+  tags        = local.tags
 
   default_policy = {
     iam_arns_administrator  = length(var.kms_key_administrator_arns) > 0 ? var.kms_key_administrator_arns : [data.aws_iam_session_context.current[0].issuer_arn]
@@ -198,7 +204,7 @@ module "ecr" {
   image_tag_mutability = "MUTABLE"
   kms_key_arn          = local.kms_key_arn
   repository_names     = [local.ecr_repository_name]
-  tags                 = var.tags
+  tags                 = local.tags
 }
 
 ################################################################################
@@ -250,7 +256,7 @@ module "fargate" {
   permissions_boundary = var.permissions_boundary
   region               = var.region
   role_policy          = data.aws_iam_policy_document.role_policy.json
-  tags                 = var.tags
+  tags                 = local.tags
   vpc_id               = var.vpc_id
 
   # The agent writes Terraform binaries, providers and run data to its root filesystem and

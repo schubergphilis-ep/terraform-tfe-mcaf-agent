@@ -83,6 +83,11 @@ run "default" {
   }
 
   assert {
+    condition     = local.tags == { tfe-organization = "my-org" }
+    error_message = "AWS resources should be tagged with the HCP Terraform organization"
+  }
+
+  assert {
     condition     = local.image == "hashicorp/tfc-agent:latest"
     error_message = "Agent image should be pulled from Docker Hub by default"
   }
@@ -288,6 +293,22 @@ run "custom_names_and_environment" {
       TFC_AGENT_SINGLE      = "false"
     }
     error_message = "Custom environment should be merged over the module defaults"
+  }
+}
+
+run "tags" {
+  command = plan
+
+  variables {
+    tags = {
+      Team             = "platform"
+      tfe-organization = "overridden"
+    }
+  }
+
+  assert {
+    condition     = local.tags == { Team = "platform", tfe-organization = "my-org" }
+    error_message = "The tfe-organization tag should be merged with, and take precedence over, the supplied tags"
   }
 }
 

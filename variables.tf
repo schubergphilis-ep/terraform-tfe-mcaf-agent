@@ -177,7 +177,7 @@ variable "subnet_ids" {
 variable "tags" {
   type        = map(string)
   default     = {}
-  description = "A mapping of tags to assign to the AWS resources."
+  description = "A mapping of tags to assign to the AWS resources. A `tfe-organization` tag with the HCP Terraform organization is always added."
 }
 
 variable "tfc_address" {

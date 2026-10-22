@@ -184,7 +184,7 @@ When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service
 | <a name="input_region"></a> [region](#input\_region) | The AWS region where resources will be created; if omitted the default provider region is used. | `string` | `null` | no |
 | <a name="input_role_policy_documents"></a> [role\_policy\_documents](#input\_role\_policy\_documents) | Additional IAM policy documents (JSON) merged into the agent role policy. This role is also used by Terraform runs on the agent. | `list(string)` | `[]` | no |
 | <a name="input_subnet_ids"></a> [subnet\_ids](#input\_subnet\_ids) | IDs of the private subnets to run the agent tasks in. | `list(string)` | n/a | yes |
-| <a name="input_tags"></a> [tags](#input\_tags) | A mapping of tags to assign to the AWS resources. | `map(string)` | `{}` | no |
+| <a name="input_tags"></a> [tags](#input\_tags) | A mapping of tags to assign to the AWS resources. A `tfe-organization` tag with the HCP Terraform organization is always added. | `map(string)` | `{}` | no |
 | <a name="input_tfc_address"></a> [tfc\_address](#input\_tfc\_address) | Address of the HCP Terraform or Terraform Enterprise instance; if null the agent default (https://app.terraform.io) is used. | `string` | `null` | no |
 | <a name="input_tfe_organization"></a> [tfe\_organization](#input\_tfe\_organization) | Name of the HCP Terraform organization | `string` | `null` | no |
 | <a name="input_vpc_id"></a> [vpc\_id](#input\_vpc\_id) | ID of the VPC to run the agent tasks in. | `string` | n/a | yes |
