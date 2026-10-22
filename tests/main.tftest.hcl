@@ -244,7 +244,7 @@ run "invalid_agent_token_secret_arn" {
   command = plan
 
   variables {
-    agent_token_secret_arn = "arn:aws:ssm:eu-central-1:123456789012:parameter/tfc-agent/token"
+    agent_token_secret_arn = "arn:aws:ssm:eu-central-1:123456789012:parameter/tfc-agent/token" #checkov:skip=CKV_SECRET_6:arn incorrectly detected as a secret
   }
 
   expect_failures = [var.agent_token_secret_arn]
