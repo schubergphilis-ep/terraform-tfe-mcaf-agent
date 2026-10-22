@@ -9,10 +9,10 @@ Deploys HCP Terraform (Terraform Cloud) or Terraform Enterprise self-hosted agen
 Everything lives in the root module:
 
 - `tfe_agent_pool` (not organization scoped by default), optional `tfe_agent_pool_allowed_projects` / `tfe_agent_pool_allowed_workspaces`, and `tfe_agent_token`
-- `aws_ssm_parameter` holding the agent token, passed to the container as a secret
+- `aws_secretsmanager_secret` (`<name>/agent-token`) holding the agent token, passed to the container as a secret. When `agent_token_secret_arn` is set, neither the token nor the secret is created and the agent reads the supplied secret (decrypted with `agent_token_secret_kms_key_arn` if it uses a CMK)
 - Optional KMS key via `schubergphilis-ep/mcaf-kms/aws` (skipped when `kms_key_arn` is set); the key policy delegates to IAM and allows CloudWatch Logs for `/ecs/<name>`
 - ECS cluster, service, task definition, IAM role, security group and log group via `schubergphilis/mcaf-fargate/aws`
-- Optional (`ecr_pull_through_cache.enabled`) ECR pull through cache rule for Docker Hub plus a pre-created KMS-encrypted repository `<prefix>/<agent_image>` via `schubergphilis-ep/mcaf-ecr/aws`; the agent role only gets `ecr:BatchImportUpstreamImage`. mcaf-ecr has no `region` input, so a precondition blocks combining the cache with `region`. Its `pull-through-cache` submodule is not used because it relies on repository creation templates (agent would need `ecr:CreateRepository`) and an extra IAM role
+- Optional (`ecr_pull_through_cache.enabled`) ECR pull through cache rule via `schubergphilis-ep/mcaf-ecr/aws//modules/pull-through-cache`, plus the cache repository `<prefix>/<agent_image>` via `schubergphilis-ep/mcaf-ecr/aws`. The repository is created by Terraform (not by ECR on first pull) so it is in state: a KMS key change replaces it and destroy removes it (`force_delete`). The submodule always creates a repository creation template; it is unused, so it gets no KMS key, tags or role (`create_ecr_repository_creation_role = false`). The agent role only gets `ecr:BatchImportUpstreamImage` on the repository. The modules have no `region` input, so a variable validation blocks combining the cache with `region`
 
 Workspace execution mode is intentionally not managed here; callers (e.g. workloads-manager) set `execution_mode = "agent"` with the `agent_pool_id` output.
 
@@ -28,7 +28,7 @@ Requires both `aws` and `tfe` providers configured by the caller. `tfe_organizat
 
 ### Bootstrap sequence
 
-1. First apply runs with remote execution (HCP Terraform hosted runners): creates agent pool, token, SSM parameter, ECS service
+1. First apply runs with remote execution (HCP Terraform hosted runners): creates agent pool, token, Secrets Manager secret, ECS service
 2. ECS agents start and register with HCP Terraform
 3. Switch workspaces to agent execution mode with the `agent_pool_id` output
 4. Keep the deploying workspace on remote execution

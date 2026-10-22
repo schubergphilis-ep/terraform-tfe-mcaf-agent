@@ -1,21 +1,30 @@
 locals {
   account_id  = data.aws_caller_identity.current.account_id
-  agent_name  = coalesce(var.agent_name, var.name)
+  agent_name  = "${var.name}-agent"
   create_kms  = var.kms_key_arn == null
   kms_key_arn = local.create_kms ? module.kms[0].arn : var.kms_key_arn
-  pool_name   = coalesce(var.pool_name, var.name)
+  pool_name   = "${var.name}-pool"
   region      = data.aws_region.current.region
 
   # Created by the mcaf-fargate module; needed upfront in the KMS key policy.
   log_group_name = "/ecs/${var.name}"
 
-  ecr_pull_through_cache_enabled = var.ecr_pull_through_cache.enabled
-  ecr_repository_prefix          = coalesce(var.ecr_pull_through_cache.ecr_repository_prefix, var.name)
-  ecr_repository_name            = local.ecr_pull_through_cache_enabled ? "${aws_ecr_pull_through_cache_rule.default[0].ecr_repository_prefix}/${var.agent_image}" : null
+  ecr_repository_prefix = coalesce(var.ecr_pull_through_cache.ecr_repository_prefix, var.name)
 
-  image = "${local.ecr_pull_through_cache_enabled ? module.ecr[0].repository_url[local.ecr_repository_name] : var.agent_image}:${var.agent_image_tag}"
+  # The pull through cache stores the image in the repository named after the rule prefix and the
+  # upstream image. The prefix is read from the rule so the repository, and so the agent tasks,
+  # are only created once the cache rule exists.
+  ecr_repository_name = var.ecr_pull_through_cache.enabled ? "${module.ecr_pull_through_cache[0].ecr_pull_through_cache_rules["docker_hub"].ecr_repository_prefix}/${var.agent_image}" : null
+  ecr_repository_arn  = var.ecr_pull_through_cache.enabled ? one(module.ecr[0].arns) : null
+  ecr_repository_url  = var.ecr_pull_through_cache.enabled ? module.ecr[0].repository_url[local.ecr_repository_name] : null
 
-  environment = merge(
+  image = "${var.ecr_pull_through_cache.enabled ? local.ecr_repository_url : var.agent_image}:${var.agent_image_tag}"
+
+  # A token is only generated and stored when no existing secret is supplied.
+  create_agent_token     = var.agent_token_secret_arn == null
+  agent_token_secret_arn = local.create_agent_token ? aws_secretsmanager_secret.default[0].arn : var.agent_token_secret_arn
+
+  env_variables = merge(
     {
       TFC_AGENT_AUTO_UPDATE = "disabled"
       TFC_AGENT_LOG_LEVEL   = var.agent_log_level
@@ -23,7 +32,7 @@ locals {
       TFC_AGENT_SINGLE      = tostring(var.agent_single_execution)
     },
     var.tfc_address != null ? { TFC_ADDRESS = var.tfc_address } : {},
-    var.environment,
+    var.env_variables,
   )
 }
 
@@ -58,21 +67,34 @@ resource "tfe_agent_pool_allowed_workspaces" "default" {
 }
 
 resource "tfe_agent_token" "default" {
+  count = local.create_agent_token ? 1 : 0
+
   agent_pool_id = tfe_agent_pool.default.id
   description   = "${local.agent_name} on ECS Fargate (${local.account_id}/${local.region})"
 }
 
-resource "aws_ssm_parameter" "default" {
-  region = var.region
-  name   = "/${var.name}/token"
-  type   = "SecureString"
-  value  = tfe_agent_token.default.token
-  key_id = local.kms_key_arn
-  tags   = var.tags
+resource "aws_secretsmanager_secret" "default" {
+  #checkov:skip=CKV2_AWS_57:The agent token is issued by HCP Terraform and cannot be rotated by Secrets Manager
+  count = local.create_agent_token ? 1 : 0
+
+  region                  = var.region
+  name                    = "${var.name}/agent-token"
+  description             = "HCP Terraform agent token for the ${local.pool_name} agent pool"
+  kms_key_id              = local.kms_key_arn
+  recovery_window_in_days = 0
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "default" {
+  count = local.create_agent_token ? 1 : 0
+
+  region        = var.region
+  secret_id     = aws_secretsmanager_secret.default[0].id
+  secret_string = tfe_agent_token.default[0].token
 }
 
 ################################################################################
-# KMS key (SSM parameter & CloudWatch log group)
+# KMS key (agent token secret & CloudWatch log group)
 ################################################################################
 
 data "aws_iam_session_context" "current" {
@@ -84,8 +106,6 @@ data "aws_iam_session_context" "current" {
 data "aws_iam_policy_document" "kms_key_policy" {
   count = local.create_kms ? 1 : 0
 
-  # The default mcaf-kms policy only allows the root principal itself; delegating to IAM lets
-  # the agent role decrypt the token through its IAM policy without a cycle on the role ARN.
   statement {
     sid       = "AllowIamDelegation"
     actions   = ["kms:*"]
@@ -142,26 +162,34 @@ module "kms" {
 # ECR pull through cache for the agent image from Docker Hub
 ################################################################################
 
-resource "aws_ecr_pull_through_cache_rule" "default" {
-  count = local.ecr_pull_through_cache_enabled ? 1 : 0
+# Creates the pull through cache rule. The submodule always creates a repository creation
+# template too, but it is unused: the cache repository below is managed by Terraform rather
+# than created by ECR on first pull, so the template needs no KMS key, tags or IAM role.
+module "ecr_pull_through_cache" {
+  count = var.ecr_pull_through_cache.enabled ? 1 : 0
 
-  credential_arn        = var.ecr_pull_through_cache.credential_arn
-  ecr_repository_prefix = local.ecr_repository_prefix
-  upstream_registry_url = "registry-1.docker.io"
+  source  = "schubergphilis-ep/mcaf-ecr/aws//modules/pull-through-cache"
+  version = "~> 2.0.0"
 
-  lifecycle {
-    precondition {
-      condition     = var.region == null
-      error_message = "The ECR pull through cache is created in the provider region, as mcaf-ecr does not support the region argument; unset region or use a provider for that region."
+  create_ecr_repository_creation_role = false
+  image_tag_mutability                = "MUTABLE" # cached tags are refreshed from Docker Hub
+  readonly_principals                 = [local.account_id]
+
+  pull_through_cache_rules = {
+    docker_hub = {
+      credential_arn        = var.ecr_pull_through_cache.credential_arn
+      description           = "Docker Hub cache for the ${var.name} HCP Terraform agent image"
+      ecr_repository_prefix = local.ecr_repository_prefix
+      upstream_registry_url = "registry-1.docker.io"
     }
   }
 }
 
-# Created upfront, rather than by ECR on first pull, so it is KMS encrypted and the agent
-# role does not need ecr:CreateRepository.
+# The cache repository is created upfront so it is held in state: changing the KMS key replaces
+# it, a destroy removes it, and the agent role does not need ecr:CreateRepository.
 module "ecr" {
   #checkov:skip=CKV_AWS_51:Pull through cache refreshes cached tags from Docker Hub, which requires mutable tags
-  count = local.ecr_pull_through_cache_enabled ? 1 : 0
+  count = var.ecr_pull_through_cache.enabled ? 1 : 0
 
   source  = "schubergphilis-ep/mcaf-ecr/aws"
   version = "~> 2.0.0"
@@ -171,22 +199,6 @@ module "ecr" {
   kms_key_arn          = local.kms_key_arn
   repository_names     = [local.ecr_repository_name]
   tags                 = var.tags
-
-  custom_lifecycle_policy_rules = jsonencode({
-    rules = [
-      {
-        rulePriority = 1
-        description  = "Keep the last ${var.ecr_pull_through_cache.image_count} images"
-        action       = { type = "expire" }
-
-        selection = {
-          tagStatus   = "any"
-          countType   = "imageCountMoreThan"
-          countNumber = var.ecr_pull_through_cache.image_count
-        }
-      }
-    ]
-  })
 }
 
 ################################################################################
@@ -198,23 +210,24 @@ data "aws_iam_policy_document" "role_policy" {
 
   statement {
     sid       = "ReadAgentToken"
-    actions   = ["ssm:GetParameters"]
-    resources = [aws_ssm_parameter.default.arn]
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [local.agent_token_secret_arn]
   }
 
   statement {
     sid       = "DecryptAgentToken"
     actions   = ["kms:Decrypt"]
-    resources = [local.kms_key_arn]
+    resources = compact([local.kms_key_arn, var.agent_token_secret_kms_key_arn])
   }
 
   dynamic "statement" {
-    for_each = local.ecr_pull_through_cache_enabled ? [true] : []
+    for_each = var.ecr_pull_through_cache.enabled ? [true] : []
 
+    # Pulling a tag that is not cached yet imports it from Docker Hub into the cache repository.
     content {
       sid       = "ImportAgentImage"
       actions   = ["ecr:BatchImportUpstreamImage"]
-      resources = module.ecr[0].arns
+      resources = [local.ecr_repository_arn]
     }
   }
 }
@@ -229,7 +242,7 @@ module "fargate" {
   cpu                  = var.cpu
   desired_count        = var.desired_count
   ecs_subnet_ids       = var.subnet_ids
-  environment          = local.environment
+  environment          = local.env_variables
   image                = local.image
   kms_key_id           = local.kms_key_arn
   log_retention_days   = var.log_retention_days
@@ -245,6 +258,6 @@ module "fargate" {
   readonly_root_filesystem = false
 
   secrets = {
-    TFC_AGENT_TOKEN = aws_ssm_parameter.default.arn
+    TFC_AGENT_TOKEN = local.agent_token_secret_arn
   }
 }

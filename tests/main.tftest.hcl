@@ -28,19 +28,9 @@ mock_provider "aws" {
     }
   }
 
-  # Known during plan so the resulting agent image can be asserted.
-  mock_resource "aws_ecr_repository" {
-    override_during = plan
-
+  mock_resource "aws_secretsmanager_secret" {
     defaults = {
-      arn            = "arn:aws:ecr:eu-central-1:123456789012:repository/tfc-agent/hashicorp/tfc-agent"
-      repository_url = "123456789012.dkr.ecr.eu-central-1.amazonaws.com/tfc-agent/hashicorp/tfc-agent"
-    }
-  }
-
-  mock_resource "aws_ssm_parameter" {
-    defaults = {
-      arn = "arn:aws:ssm:eu-central-1:123456789012:parameter/tfc-agent/token"
+      arn = "arn:aws:secretsmanager:eu-central-1:123456789012:secret:tfc-agent/agent-token-AbCdEf"
     }
   }
 }
@@ -58,8 +48,8 @@ run "default" {
   command = plan
 
   assert {
-    condition     = tfe_agent_pool.default.name == "tfc-agent" && tfe_agent_pool.default.organization_scoped == false
-    error_message = "Agent pool should default to the module name and not be organization scoped"
+    condition     = tfe_agent_pool.default.name == "tfc-agent-pool" && tfe_agent_pool.default.organization_scoped == false
+    error_message = "Agent pool should be named after the module name and not be organization scoped"
   }
 
   assert {
@@ -73,33 +63,42 @@ run "default" {
   }
 
   assert {
-    condition     = aws_ssm_parameter.default.name == "/tfc-agent/token" && aws_ssm_parameter.default.type == "SecureString"
-    error_message = "Agent token should be stored as SecureString under the module name"
+    condition     = length(tfe_agent_token.default) == 1 && aws_secretsmanager_secret.default[0].name == "tfc-agent/agent-token" && length(aws_secretsmanager_secret_version.default) == 1
+    error_message = "Agent token should be generated and stored in a Secrets Manager secret under the module name"
   }
 
   assert {
-    condition = local.environment == {
+    condition = local.env_variables == {
       TFC_AGENT_AUTO_UPDATE = "disabled"
       TFC_AGENT_LOG_LEVEL   = "info"
-      TFC_AGENT_NAME        = "tfc-agent"
+      TFC_AGENT_NAME        = "tfc-agent-agent"
       TFC_AGENT_SINGLE      = "true"
     }
     error_message = "Unexpected default agent environment"
   }
 
   assert {
-    condition     = length(aws_ecr_pull_through_cache_rule.default) == 0 && length(module.ecr) == 0
+    condition     = length(module.ecr_pull_through_cache) == 0 && length(module.ecr) == 0 && local.ecr_repository_url == null
     error_message = "No ECR pull through cache should be created by default"
   }
 
   assert {
-    condition     = local.image == "hashicorp/tfc-agent:1.28"
+    condition     = local.image == "hashicorp/tfc-agent:latest"
     error_message = "Agent image should be pulled from Docker Hub by default"
   }
 }
 
 run "ecr_pull_through_cache" {
   command = plan
+
+  # The repository ARN and URL are only known after apply.
+  override_module {
+    target = module.ecr
+    outputs = {
+      arns           = ["arn:aws:ecr:eu-central-1:123456789012:repository/tfc-agent/hashicorp/tfc-agent"]
+      repository_url = { "tfc-agent/hashicorp/tfc-agent" = "123456789012.dkr.ecr.eu-central-1.amazonaws.com/tfc-agent/hashicorp/tfc-agent" }
+    }
+  }
 
   variables {
     ecr_pull_through_cache = {
@@ -109,17 +108,22 @@ run "ecr_pull_through_cache" {
   }
 
   assert {
-    condition     = aws_ecr_pull_through_cache_rule.default[0].ecr_repository_prefix == "tfc-agent" && aws_ecr_pull_through_cache_rule.default[0].upstream_registry_url == "registry-1.docker.io"
+    condition     = module.ecr_pull_through_cache[0].ecr_pull_through_cache_rules["docker_hub"].ecr_repository_prefix == "tfc-agent" && module.ecr_pull_through_cache[0].ecr_pull_through_cache_rules["docker_hub"].upstream_registry_url == "registry-1.docker.io"
     error_message = "Pull through cache rule for Docker Hub should use the module name as prefix"
   }
 
   assert {
-    condition     = length(module.ecr) == 1 && local.ecr_repository_name == "tfc-agent/hashicorp/tfc-agent"
-    error_message = "Cache repository should match the pull through cache path"
+    condition     = local.ecr_repository_name == "tfc-agent/hashicorp/tfc-agent" && length(module.ecr) == 1
+    error_message = "The cache repository of the agent image should be created by Terraform"
   }
 
   assert {
-    condition     = local.image == "123456789012.dkr.ecr.eu-central-1.amazonaws.com/tfc-agent/hashicorp/tfc-agent:1.28"
+    condition     = local.ecr_repository_arn == "arn:aws:ecr:eu-central-1:123456789012:repository/tfc-agent/hashicorp/tfc-agent"
+    error_message = "Agent role permissions should be scoped to the cache repository of the agent image"
+  }
+
+  assert {
+    condition     = local.image == "123456789012.dkr.ecr.eu-central-1.amazonaws.com/tfc-agent/hashicorp/tfc-agent:latest"
     error_message = "Agent image should be pulled from the ECR cache repository"
   }
 }
@@ -153,7 +157,7 @@ run "ecr_pull_through_cache_with_region" {
     }
   }
 
-  expect_failures = [aws_ecr_pull_through_cache_rule.default]
+  expect_failures = [var.ecr_pull_through_cache]
 }
 
 run "ecr_pull_through_cache_without_credential" {
@@ -194,8 +198,8 @@ run "existing_kms_key" {
   }
 
   assert {
-    condition     = aws_ssm_parameter.default.key_id == var.kms_key_arn
-    error_message = "SSM parameter should be encrypted with the provided KMS key"
+    condition     = aws_secretsmanager_secret.default[0].kms_key_id == var.kms_key_arn
+    error_message = "Agent token secret should be encrypted with the provided KMS key"
   }
 }
 
@@ -210,6 +214,35 @@ run "kms_key_administrators" {
     condition     = length(module.kms) == 1 && length(data.aws_iam_session_context.current) == 0
     error_message = "Session context should not be looked up when administrators are provided"
   }
+}
+
+run "existing_agent_token_secret" {
+  command = plan
+
+  variables {
+    agent_token_secret_arn         = "arn:aws:secretsmanager:eu-central-1:123456789012:secret:tfc-agent/existing-token-AbCdEf"
+    agent_token_secret_kms_key_arn = "arn:aws:kms:eu-central-1:123456789012:key/11111111-1111-1111-1111-111111111111"
+  }
+
+  assert {
+    condition     = length(tfe_agent_token.default) == 0 && length(aws_secretsmanager_secret.default) == 0 && length(aws_secretsmanager_secret_version.default) == 0
+    error_message = "No agent token or secret should be created when agent_token_secret_arn is set"
+  }
+
+  assert {
+    condition     = local.agent_token_secret_arn == var.agent_token_secret_arn
+    error_message = "Agent should read the token from the supplied secret"
+  }
+}
+
+run "invalid_agent_token_secret_arn" {
+  command = plan
+
+  variables {
+    agent_token_secret_arn = "arn:aws:ssm:eu-central-1:123456789012:parameter/tfc-agent/token"
+  }
+
+  expect_failures = [var.agent_token_secret_arn]
 }
 
 run "allowed_projects_and_workspaces" {
@@ -230,30 +263,28 @@ run "custom_names_and_environment" {
   command = plan
 
   variables {
-    name                   = "network-agent"
-    agent_name             = "network"
+    name                   = "network"
     agent_single_execution = false
-    pool_name              = "network-pool"
     tfc_address            = "https://tfe.example.com"
 
-    environment = {
+    env_variables = {
       TFC_AGENT_LOG_LEVEL = "debug"
       HTTPS_PROXY         = "http://proxy.example.com:3128"
     }
   }
 
   assert {
-    condition     = tfe_agent_pool.default.name == "network-pool" && aws_ssm_parameter.default.name == "/network-agent/token"
-    error_message = "Custom pool and resource names should be used"
+    condition     = tfe_agent_pool.default.name == "network-pool" && aws_secretsmanager_secret.default[0].name == "network/agent-token"
+    error_message = "Pool and resource names should be derived from the module name"
   }
 
   assert {
-    condition = local.environment == {
+    condition = local.env_variables == {
       HTTPS_PROXY           = "http://proxy.example.com:3128"
       TFC_ADDRESS           = "https://tfe.example.com"
       TFC_AGENT_AUTO_UPDATE = "disabled"
       TFC_AGENT_LOG_LEVEL   = "debug"
-      TFC_AGENT_NAME        = "network"
+      TFC_AGENT_NAME        = "network-agent"
       TFC_AGENT_SINGLE      = "false"
     }
     error_message = "Custom environment should be merged over the module defaults"

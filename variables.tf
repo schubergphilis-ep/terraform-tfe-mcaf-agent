@@ -6,7 +6,7 @@ variable "agent_image" {
 
 variable "agent_image_tag" {
   type        = string
-  default     = "1.28"
+  default     = "latest"
   description = "Tag of the HCP Terraform agent container image."
 }
 
@@ -21,16 +21,27 @@ variable "agent_log_level" {
   }
 }
 
-variable "agent_name" {
-  type        = string
-  default     = null
-  description = "Name of the agents as shown in HCP Terraform; defaults to `name`."
-}
-
 variable "agent_single_execution" {
   type        = bool
   default     = true
   description = "Stop the agent after each run so every run starts in a fresh container; ECS replaces the stopped task."
+}
+
+variable "agent_token_secret_arn" {
+  type        = string
+  default     = null
+  description = "ARN of an existing Secrets Manager secret holding the agent token as plain text; if null a token is generated and stored in a new secret."
+
+  validation {
+    condition     = var.agent_token_secret_arn == null || can(regex("^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$", var.agent_token_secret_arn))
+    error_message = "agent_token_secret_arn must be the ARN of a Secrets Manager secret."
+  }
+}
+
+variable "agent_token_secret_kms_key_arn" {
+  type        = string
+  default     = null
+  description = "ARN of the customer managed KMS key encrypting the secret in `agent_token_secret_arn`, so the agent role can decrypt it. Not needed when the secret uses the AWS managed key."
 }
 
 variable "allowed_project_ids" {
@@ -78,10 +89,9 @@ variable "ecr_pull_through_cache" {
     enabled               = optional(bool, false)
     credential_arn        = optional(string)
     ecr_repository_prefix = optional(string)
-    image_count           = optional(number, 10)
   })
   default     = {}
-  description = "Pull the agent image through an ECR pull through cache for Docker Hub instead of directly from Docker Hub. `credential_arn` is the ARN of a Secrets Manager secret, prefixed with `ecr-pullthroughcache/`, holding Docker Hub credentials. `ecr_repository_prefix` defaults to `name`; `image_count` is the number of cached images to keep."
+  description = "Pull the agent image through an ECR pull through cache for Docker Hub instead of directly from Docker Hub. `credential_arn` is the ARN of a Secrets Manager secret, prefixed with `ecr-pullthroughcache/`, holding Docker Hub credentials. `ecr_repository_prefix` defaults to `name`."
 
   validation {
     condition     = !var.ecr_pull_through_cache.enabled || can(regex("^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:ecr-pullthroughcache/", var.ecr_pull_through_cache.credential_arn))
@@ -94,12 +104,12 @@ variable "ecr_pull_through_cache" {
   }
 
   validation {
-    condition     = var.ecr_pull_through_cache.image_count >= 1
-    error_message = "image_count must be at least 1."
+    condition     = !var.ecr_pull_through_cache.enabled || var.region == null
+    error_message = "The ECR pull through cache is created in the provider region, as the mcaf-ecr pull-through-cache module does not support the region argument; unset region or use a provider for that region."
   }
 }
 
-variable "environment" {
+variable "env_variables" {
   type        = map(string)
   default     = {}
   description = "Additional environment variables for the agent container, e.g. `TFC_AGENT_*` settings. Overrides the module defaults."
@@ -114,7 +124,7 @@ variable "kms_key_administrator_arns" {
 variable "kms_key_arn" {
   type        = string
   default     = null
-  description = "ARN of an existing KMS key to encrypt the SSM parameter and CloudWatch log group; if null a key is created."
+  description = "ARN of an existing KMS key to encrypt the agent token secret and CloudWatch log group; if null a key is created."
 }
 
 variable "log_retention_days" {
@@ -145,12 +155,6 @@ variable "permissions_boundary" {
   type        = string
   default     = null
   description = "ARN of the permissions boundary to set on the agent IAM role."
-}
-
-variable "pool_name" {
-  type        = string
-  default     = null
-  description = "Name of the HCP Terraform agent pool; defaults to `name`."
 }
 
 variable "region" {
@@ -185,7 +189,7 @@ variable "tfc_address" {
 variable "tfe_organization" {
   type        = string
   default     = null
-  description = "Name of the HCP Terraform organization; if null the tfe provider organization is used."
+  description = "Name of the HCP Terraform organization"
 }
 
 variable "vpc_id" {
