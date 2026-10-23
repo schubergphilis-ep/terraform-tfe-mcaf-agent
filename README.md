@@ -94,7 +94,7 @@ Considerations:
 - **Repository lifecycle:** the repository is managed by Terraform rather than created by ECR on the first pull, so it is replaced when the KMS key changes and removed, including its cached images, when the module is destroyed. Untagged images expire after one day. The pull-through-cache module always creates a repository creation template as well; it is unused, so it has no KMS key, tags or IAM role.
 - **Agent permissions:** the agent role is granted `ecr:BatchImportUpstreamImage` on the agent image repository, so pulling a tag that is not cached yet imports it from Docker Hub.
 - **First pull:** when ECR is reached through interface VPC endpoints, AWS notes that the first pull of an image may require a route to the internet.
-- **Region:** the pull-through-cache module does not support the `region` argument, so the pull through cache cannot be combined with `region`; use a provider configured for the target region instead.
+- **Region:** the pull through cache rule and the cache repository are created in `region`, like the agents, so the agents always pull from the same region.
 - **Naming:** pull through cache rules are unique per account and region on `ecr_repository_prefix`, which defaults to `name`.
 - **Tags:** cached tags are refreshed from Docker Hub, so the repository uses mutable tags; pin `agent_image_tag` to a specific version to control which image runs.
 
@@ -196,7 +196,7 @@ When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service
 | <a name="input_permissions_boundary"></a> [permissions\_boundary](#input\_permissions\_boundary) | ARN of the permissions boundary to set on the agent IAM role. | `string` | `null` | no |
 | <a name="input_region"></a> [region](#input\_region) | The AWS region where resources will be created; if omitted the default provider region is used. | `string` | `null` | no |
 | <a name="input_role_policy_documents"></a> [role\_policy\_documents](#input\_role\_policy\_documents) | Additional IAM policy documents (JSON) merged into the agent role policy. This role is also used by Terraform runs on the agent. | `list(string)` | `[]` | no |
-| <a name="input_tags"></a> [tags](#input\_tags) | A mapping of tags to assign to the AWS resources. A `tfe-organization` tag with the HCP Terraform organization is always added. | `map(string)` | `{}` | no |
+| <a name="input_tags"></a> [tags](#input\_tags) | A mapping of tags to assign to the AWS resources. | `map(string)` | `{}` | no |
 | <a name="input_tfe_organization"></a> [tfe\_organization](#input\_tfe\_organization) | Name of the HCP Terraform organization | `string` | `null` | no |
 
 ## Outputs

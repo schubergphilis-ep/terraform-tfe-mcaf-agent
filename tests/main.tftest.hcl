@@ -101,11 +101,6 @@ run "default" {
   }
 
   assert {
-    condition     = local.tags == { tfe-organization = "my-org" }
-    error_message = "AWS resources should be tagged with the HCP Terraform organization"
-  }
-
-  assert {
     condition     = local.image == "hashicorp/tfc-agent:latest"
     error_message = "Agent image should be pulled from Docker Hub by default"
   }
@@ -148,6 +143,45 @@ run "ecr_pull_through_cache" {
   assert {
     condition     = local.image == "123456789012.dkr.ecr.eu-central-1.amazonaws.com/tfc-agent/hashicorp/tfc-agent:latest"
     error_message = "Agent image should be pulled from the ECR cache repository"
+  }
+}
+
+run "ecr_pull_through_cache_with_region" {
+  command = plan
+
+  variables {
+    region = "eu-west-1"
+
+    ecr_pull_through_cache = {
+      enabled        = true
+      credential_arn = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:ecr-pullthroughcache/docker-hub-AbCdEf"
+    }
+  }
+
+  override_data {
+    target = data.aws_region.current
+    values = {
+      region = "eu-west-1"
+    }
+  }
+
+  # The repository ARN and URL are only known after apply.
+  override_module {
+    target = module.ecr
+    outputs = {
+      arns           = ["arn:aws:ecr:eu-west-1:123456789012:repository/tfc-agent/hashicorp/tfc-agent"]
+      repository_url = { "tfc-agent/hashicorp/tfc-agent" = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/tfc-agent/hashicorp/tfc-agent" }
+    }
+  }
+
+  assert {
+    condition     = length(module.ecr_pull_through_cache) == 1 && length(module.ecr) == 1 && local.region == "eu-west-1"
+    error_message = "The pull through cache should be combinable with region"
+  }
+
+  assert {
+    condition     = local.image == "123456789012.dkr.ecr.eu-west-1.amazonaws.com/tfc-agent/hashicorp/tfc-agent:latest"
+    error_message = "Agent image should be pulled from the cache repository in the agent region"
   }
 }
 
@@ -210,21 +244,6 @@ run "ecr_pull_through_cache_invalid_prefix" {
       enabled               = true
       credential_arn        = "arn:aws:secretsmanager:eu-central-1:123456789012:secret:ecr-pullthroughcache/docker-hub-AbCdEf"
       ecr_repository_prefix = "Docker-Hub"
-    }
-  }
-
-  expect_failures = [var.ecr_pull_through_cache]
-}
-
-run "ecr_pull_through_cache_with_region" {
-  command = plan
-
-  variables {
-    region = "eu-west-1"
-
-    ecr_pull_through_cache = {
-      enabled        = true
-      credential_arn = "arn:aws:secretsmanager:eu-central-1:123456789012:secret:ecr-pullthroughcache/docker-hub-AbCdEf"
     }
   }
 
@@ -422,14 +441,13 @@ run "tags" {
 
   variables {
     tags = {
-      Team             = "platform"
-      tfe-organization = "overridden"
+      Team = "platform"
     }
   }
 
   assert {
-    condition     = local.tags == { Team = "platform", tfe-organization = "my-org" }
-    error_message = "The tfe-organization tag should be merged with, and take precedence over, the supplied tags"
+    condition     = aws_secretsmanager_secret.default[0].tags == var.tags
+    error_message = "AWS resources should be tagged with exactly the supplied tags"
   }
 }
 
