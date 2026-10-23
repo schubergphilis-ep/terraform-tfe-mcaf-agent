@@ -146,8 +146,8 @@ When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service
 
 | Name | Source | Version |
 |------|--------|---------|
-| <a name="module_ecr"></a> [ecr](#module\_ecr) | schubergphilis-ep/mcaf-ecr/aws | ~> 2.0.0 |
-| <a name="module_ecr_pull_through_cache"></a> [ecr\_pull\_through\_cache](#module\_ecr\_pull\_through\_cache) | schubergphilis-ep/mcaf-ecr/aws//modules/pull-through-cache | ~> 2.0.0 |
+| <a name="module_ecr"></a> [ecr](#module\_ecr) | schubergphilis-ep/mcaf-ecr/aws | ~> 2.1.0 |
+| <a name="module_ecr_pull_through_cache"></a> [ecr\_pull\_through\_cache](#module\_ecr\_pull\_through\_cache) | schubergphilis-ep/mcaf-ecr/aws//modules/pull-through-cache | ~> 2.1.0 |
 | <a name="module_fargate"></a> [fargate](#module\_fargate) | schubergphilis/mcaf-fargate/aws | ~> 3.2.0 |
 | <a name="module_kms_key"></a> [kms\_key](#module\_kms\_key) | schubergphilis-ep/mcaf-kms/aws | ~> 3.0.0 |
 
