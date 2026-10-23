@@ -16,9 +16,16 @@ mock_provider "aws" {
     }
   }
 
-  mock_data "aws_iam_session_context" {
+  # The VPC is derived from the subnets; all subnet_ids must be in it.
+  mock_data "aws_subnet" {
     defaults = {
-      issuer_arn = "arn:aws:iam::123456789012:role/terraform"
+      vpc_id = "vpc-0123456789abcdef0"
+    }
+  }
+
+  mock_data "aws_subnets" {
+    defaults = {
+      ids = ["subnet-0123456789abcdef0", "subnet-0123456789abcdef1"]
     }
   }
 
@@ -40,7 +47,13 @@ mock_provider "tfe" {}
 variables {
   subnet_ids       = ["subnet-0123456789abcdef0"]
   tfe_organization = "my-org"
-  vpc_id           = "vpc-0123456789abcdef0"
+
+  kms_key_configuration = {
+    iam_arns_administrator = ["arn:aws:iam::123456789012:role/terraform"]
+  }
+
+  # A pool that is not organization scoped needs at least one allowed project or workspace.
+  allowed_project_ids = ["prj-AbCdEfGhIjKlMnOp"]
 }
 
 # The default test checks the module logic using its default values.
@@ -53,13 +66,13 @@ run "default" {
   }
 
   assert {
-    condition     = length(tfe_agent_pool_allowed_projects.default) == 0 && length(tfe_agent_pool_allowed_workspaces.default) == 0
-    error_message = "No allowed projects or workspaces should be configured by default"
+    condition     = length(tfe_agent_pool_allowed_projects.default) == 1 && length(tfe_agent_pool_allowed_workspaces.default) == 0
+    error_message = "Only the allowed projects should be configured"
   }
 
   assert {
-    condition     = length(module.kms) == 1 && length(data.aws_iam_session_context.current) == 1
-    error_message = "A KMS key administered by the Terraform role should be created by default"
+    condition     = length(module.kms_key) == 1 && length(data.aws_iam_policy_document.kms_key_policy) == 1
+    error_message = "A KMS key should be created when kms_key_configuration is set"
   }
 
   assert {
@@ -68,7 +81,7 @@ run "default" {
   }
 
   assert {
-    condition = local.env_variables == {
+    condition = local.agent_env_variables == {
       TFC_AGENT_AUTO_UPDATE = "disabled"
       TFC_AGENT_LOG_LEVEL   = "info"
       TFC_AGENT_NAME        = "tfc-agent-agent"
@@ -80,6 +93,11 @@ run "default" {
   assert {
     condition     = length(module.ecr_pull_through_cache) == 0 && length(module.ecr) == 0 && local.ecr_repository_url == null
     error_message = "No ECR pull through cache should be created by default"
+  }
+
+  assert {
+    condition     = local.vpc_id == "vpc-0123456789abcdef0"
+    error_message = "The VPC should be derived from the subnets"
   }
 
   assert {
@@ -150,6 +168,54 @@ run "ecr_pull_through_cache_custom_prefix" {
   }
 }
 
+run "ecr_pull_through_cache_invalid_name_as_prefix" {
+  command = plan
+
+  variables {
+    name = "TFC-Agent"
+
+    ecr_pull_through_cache = {
+      enabled        = true
+      credential_arn = "arn:aws:secretsmanager:eu-central-1:123456789012:secret:ecr-pullthroughcache/docker-hub-AbCdEf"
+    }
+  }
+
+  expect_failures = [var.ecr_pull_through_cache]
+}
+
+run "ecr_pull_through_cache_prefix_overrides_name" {
+  command = plan
+
+  variables {
+    name = "TFC-Agent"
+
+    ecr_pull_through_cache = {
+      enabled               = true
+      credential_arn        = "arn:aws:secretsmanager:eu-central-1:123456789012:secret:ecr-pullthroughcache/docker-hub-AbCdEf"
+      ecr_repository_prefix = "tfc-agent"
+    }
+  }
+
+  assert {
+    condition     = local.ecr_repository_prefix == "tfc-agent"
+    error_message = "A valid ecr_repository_prefix should be accepted with a name that is not a valid prefix"
+  }
+}
+
+run "ecr_pull_through_cache_invalid_prefix" {
+  command = plan
+
+  variables {
+    ecr_pull_through_cache = {
+      enabled               = true
+      credential_arn        = "arn:aws:secretsmanager:eu-central-1:123456789012:secret:ecr-pullthroughcache/docker-hub-AbCdEf"
+      ecr_repository_prefix = "Docker-Hub"
+    }
+  }
+
+  expect_failures = [var.ecr_pull_through_cache]
+}
+
 run "ecr_pull_through_cache_with_region" {
   command = plan
 
@@ -194,11 +260,12 @@ run "existing_kms_key" {
   command = plan
 
   variables {
-    kms_key_arn = "arn:aws:kms:eu-central-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+    kms_key_arn           = "arn:aws:kms:eu-central-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+    kms_key_configuration = null
   }
 
   assert {
-    condition     = length(module.kms) == 0 && length(data.aws_iam_session_context.current) == 0
+    condition     = length(module.kms_key) == 0 && length(data.aws_iam_policy_document.kms_key_policy) == 0
     error_message = "No KMS key should be created when kms_key_arn is set"
   }
 
@@ -208,17 +275,36 @@ run "existing_kms_key" {
   }
 }
 
-run "kms_key_administrators" {
+run "kms_key_arn_and_configuration" {
   command = plan
 
   variables {
-    kms_key_administrator_arns = ["arn:aws:iam::123456789012:role/admin"]
+    kms_key_arn = "arn:aws:kms:eu-central-1:123456789012:key/00000000-0000-0000-0000-000000000000"
   }
 
-  assert {
-    condition     = length(module.kms) == 1 && length(data.aws_iam_session_context.current) == 0
-    error_message = "Session context should not be looked up when administrators are provided"
+  expect_failures = [var.kms_key_configuration]
+}
+
+run "kms_key_without_configuration" {
+  command = plan
+
+  variables {
+    kms_key_configuration = null
   }
+
+  expect_failures = [var.kms_key_configuration]
+}
+
+run "kms_key_without_administrators" {
+  command = plan
+
+  variables {
+    kms_key_configuration = {
+      iam_arns_administrator = []
+    }
+  }
+
+  expect_failures = [var.kms_key_configuration]
 }
 
 run "existing_agent_token_secret" {
@@ -264,15 +350,50 @@ run "allowed_projects_and_workspaces" {
   }
 }
 
+run "not_organization_scoped_without_allowed_ids" {
+  command = plan
+
+  variables {
+    allowed_project_ids = []
+  }
+
+  expect_failures = [var.organization_scoped]
+}
+
+run "organization_scoped" {
+  command = plan
+
+  variables {
+    organization_scoped = true
+    allowed_project_ids = []
+  }
+
+  assert {
+    condition     = tfe_agent_pool.default.organization_scoped == true && length(tfe_agent_pool_allowed_projects.default) == 0 && length(tfe_agent_pool_allowed_workspaces.default) == 0
+    error_message = "An organization scoped pool should have no allowed projects or workspaces"
+  }
+}
+
+run "organization_scoped_with_allowed_ids" {
+  command = plan
+
+  variables {
+    organization_scoped   = true
+    allowed_workspace_ids = ["ws-AbCdEfGhIjKlMnOp"]
+  }
+
+  expect_failures = [var.organization_scoped]
+}
+
 run "custom_names_and_environment" {
   command = plan
 
   variables {
     name                   = "network"
     agent_single_execution = false
-    tfc_address            = "https://tfe.example.com"
+    agent_tfc_address      = "https://tfe.example.com"
 
-    env_variables = {
+    agent_env_variables = {
       TFC_AGENT_LOG_LEVEL = "debug"
       HTTPS_PROXY         = "http://proxy.example.com:3128"
     }
@@ -284,7 +405,7 @@ run "custom_names_and_environment" {
   }
 
   assert {
-    condition = local.env_variables == {
+    condition = local.agent_env_variables == {
       HTTPS_PROXY           = "http://proxy.example.com:3128"
       TFC_ADDRESS           = "https://tfe.example.com"
       TFC_AGENT_AUTO_UPDATE = "disabled"
@@ -310,6 +431,59 @@ run "tags" {
     condition     = local.tags == { Team = "platform", tfe-organization = "my-org" }
     error_message = "The tfe-organization tag should be merged with, and take precedence over, the supplied tags"
   }
+}
+
+run "subnets_in_same_vpc" {
+  command = plan
+
+  variables {
+    subnet_ids = ["subnet-0123456789abcdef0", "subnet-0123456789abcdef1"]
+  }
+
+  assert {
+    condition     = local.vpc_id == "vpc-0123456789abcdef0"
+    error_message = "Subnets in the same VPC should be accepted"
+  }
+}
+
+run "subnets_in_different_vpcs" {
+  command = plan
+
+  variables {
+    subnet_ids = ["subnet-0123456789abcdef0", "subnet-0fedcba9876543210"]
+  }
+
+  expect_failures = [data.aws_subnets.vpc]
+}
+
+run "no_subnets" {
+  command = plan
+
+  variables {
+    subnet_ids = []
+  }
+
+  expect_failures = [var.subnet_ids]
+}
+
+run "name_too_long" {
+  command = plan
+
+  variables {
+    name = "an-agent-name-that-is-longer-than-46-characters"
+  }
+
+  expect_failures = [var.name]
+}
+
+run "name_invalid_characters" {
+  command = plan
+
+  variables {
+    name = "tfc.agent"
+  }
+
+  expect_failures = [var.name]
 }
 
 run "invalid_log_level" {

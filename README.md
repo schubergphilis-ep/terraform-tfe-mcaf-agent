@@ -25,11 +25,14 @@ module "tfc_agent" {
 
   allowed_project_ids = ["prj-AbCdEfGhIjKlMnOp"]
   subnet_ids          = data.aws_subnets.private.ids
-  vpc_id              = data.aws_vpc.default.id
+
+  kms_key_configuration = {
+    iam_arns_administrator = ["arn:aws:iam::123456789012:role/terraform"]
+  }
 }
 ```
 
-All AWS resource names are derived from `name`, so the module can be deployed multiple times in the same account and region by using a unique `name` per deployment. Point the agents at a Terraform Enterprise instance with `tfc_address`.
+All AWS resource names are derived from `name`, so the module can be deployed multiple times in the same account and region by using a unique `name` per deployment. Point the agents at a Terraform Enterprise instance with `agent_tfc_address`.
 
 ### Bootstrapping
 
@@ -41,11 +44,11 @@ Keep the workspace that deploys the agents on remote execution, otherwise a brok
 
 ### Agent pool scope
 
-By default the agent pool is not organization scoped: only the projects in `allowed_project_ids` and the workspaces in `allowed_workspace_ids` can use it. Setting `organization_scoped = true` allows every workspace in the organization to run on the agents, and therefore to use their network access and IAM role.
+By default the agent pool is not organization scoped: only the projects in `allowed_project_ids` and the workspaces in `allowed_workspace_ids` can use it, so at least one of them must be set. Setting `organization_scoped = true` allows every workspace in the organization to run on the agents, and therefore to use their network access and IAM role; both lists must then be empty.
 
 ### Network requirements
 
-The agents run in the private subnets passed in `subnet_ids` and need outbound HTTPS access. When egress is filtered, for example by a firewall domain allow list, allow at least:
+The agents run in the private subnets passed in `subnet_ids`, in the VPC those subnets belong to, and need outbound HTTPS access. When egress is filtered, for example by a firewall domain allow list, allow at least:
 
 | Purpose | Destination |
 |---------|-------------|
@@ -74,7 +77,10 @@ module "tfc_agent" {
   version = "~> 1.0"
 
   subnet_ids = data.aws_subnets.private.ids
-  vpc_id     = data.aws_vpc.default.id
+
+  kms_key_configuration = {
+    iam_arns_administrator = ["arn:aws:iam::123456789012:role/terraform"]
+  }
 
   ecr_pull_through_cache = {
     enabled        = true
@@ -112,7 +118,11 @@ module "tfc_agent" {
 
 As the agent pool is created by this module, the token can only be created after a first apply; until the secret holds a valid token the agent tasks fail to register.
 
-### Using an existing KMS key
+### KMS key
+
+Either set `kms_key_configuration` to have the module create a KMS key, or `kms_key_arn` to use an existing one; exactly one of them is required.
+
+The created key is administered by the principals in `kms_key_configuration.iam_arns_administrator`, which should include the role running Terraform. Its key policy does not delegate the key to IAM in general: principals in the account can only use it, when their IAM policies allow it, through Secrets Manager (for the agent token) and ECR (to create the encrypted cache repository), and the CloudWatch Logs service can use it for the `/ecs/<name>` log group.
 
 When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service to use the key for the `/ecs/<name>` log group, and must allow IAM policies in the account to grant `kms:Decrypt` to the agent role. With the ECR pull through cache enabled, the role running Terraform must also be allowed to use the key for the encrypted repository (`kms:CreateGrant`, `kms:DescribeKey`).
 
@@ -139,7 +149,7 @@ When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service
 | <a name="module_ecr"></a> [ecr](#module\_ecr) | schubergphilis-ep/mcaf-ecr/aws | ~> 2.0.0 |
 | <a name="module_ecr_pull_through_cache"></a> [ecr\_pull\_through\_cache](#module\_ecr\_pull\_through\_cache) | schubergphilis-ep/mcaf-ecr/aws//modules/pull-through-cache | ~> 2.0.0 |
 | <a name="module_fargate"></a> [fargate](#module\_fargate) | schubergphilis/mcaf-fargate/aws | ~> 3.2.0 |
-| <a name="module_kms"></a> [kms](#module\_kms) | schubergphilis-ep/mcaf-kms/aws | ~> 3.0.0 |
+| <a name="module_kms_key"></a> [kms\_key](#module\_kms\_key) | schubergphilis-ep/mcaf-kms/aws | ~> 3.0.0 |
 
 ## Resources
 
@@ -154,30 +164,31 @@ When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service
 | [aws_caller_identity.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/caller_identity) | data source |
 | [aws_iam_policy_document.kms_key_policy](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.role_policy](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
-| [aws_iam_session_context.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_session_context) | data source |
 | [aws_region.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/region) | data source |
+| [aws_subnet.selected](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/subnet) | data source |
+| [aws_subnets.vpc](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/subnets) | data source |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
-| <a name="input_subnet_ids"></a> [subnet\_ids](#input\_subnet\_ids) | IDs of the private subnets to run the agent tasks in. | `list(string)` | n/a | yes |
-| <a name="input_vpc_id"></a> [vpc\_id](#input\_vpc\_id) | ID of the VPC to run the agent tasks in. | `string` | n/a | yes |
+| <a name="input_subnet_ids"></a> [subnet\_ids](#input\_subnet\_ids) | IDs of the private subnets to run the agent tasks in; they must all be in the same VPC, which is used for the agent tasks. | `list(string)` | n/a | yes |
+| <a name="input_agent_env_variables"></a> [agent\_env\_variables](#input\_agent\_env\_variables) | Additional environment variables for the agent container, e.g. `TFC_AGENT_*` settings. Overrides the module defaults. | `map(string)` | `{}` | no |
 | <a name="input_agent_image"></a> [agent\_image](#input\_agent\_image) | Container image of the HCP Terraform agent, without tag. When `ecr_pull_through_cache` is enabled, this is the Docker Hub repository to cache. | `string` | `"hashicorp/tfc-agent"` | no |
 | <a name="input_agent_image_tag"></a> [agent\_image\_tag](#input\_agent\_image\_tag) | Tag of the HCP Terraform agent container image. | `string` | `"latest"` | no |
 | <a name="input_agent_log_level"></a> [agent\_log\_level](#input\_agent\_log\_level) | Log level of the HCP Terraform agent. | `string` | `"info"` | no |
 | <a name="input_agent_single_execution"></a> [agent\_single\_execution](#input\_agent\_single\_execution) | Stop the agent after each run so every run starts in a fresh container; ECS replaces the stopped task. | `bool` | `true` | no |
+| <a name="input_agent_tfc_address"></a> [agent\_tfc\_address](#input\_agent\_tfc\_address) | Address of the HCP Terraform or Terraform Enterprise instance; if null the agent default (https://app.terraform.io) is used. | `string` | `null` | no |
 | <a name="input_agent_token_secret_arn"></a> [agent\_token\_secret\_arn](#input\_agent\_token\_secret\_arn) | ARN of an existing Secrets Manager secret holding the agent token as plain text; if null a token is generated and stored in a new secret. | `string` | `null` | no |
 | <a name="input_agent_token_secret_kms_key_arn"></a> [agent\_token\_secret\_kms\_key\_arn](#input\_agent\_token\_secret\_kms\_key\_arn) | ARN of the customer managed KMS key encrypting the secret in `agent_token_secret_arn`, so the agent role can decrypt it. Not needed when the secret uses the AWS managed key. | `string` | `null` | no |
-| <a name="input_allowed_project_ids"></a> [allowed\_project\_ids](#input\_allowed\_project\_ids) | IDs of the HCP Terraform projects whose workspaces may use the agent pool. Only used when `organization_scoped` is false. | `set(string)` | `[]` | no |
-| <a name="input_allowed_workspace_ids"></a> [allowed\_workspace\_ids](#input\_allowed\_workspace\_ids) | IDs of the HCP Terraform workspaces that may use the agent pool. Only used when `organization_scoped` is false. | `set(string)` | `[]` | no |
+| <a name="input_allowed_project_ids"></a> [allowed\_project\_ids](#input\_allowed\_project\_ids) | IDs of the HCP Terraform projects whose workspaces may use the agent pool. When `organization_scoped` is false at least one project or workspace is required; when it is true this must be empty. | `set(string)` | `[]` | no |
+| <a name="input_allowed_workspace_ids"></a> [allowed\_workspace\_ids](#input\_allowed\_workspace\_ids) | IDs of the HCP Terraform workspaces that may use the agent pool. When `organization_scoped` is false at least one project or workspace is required; when it is true this must be empty. | `set(string)` | `[]` | no |
 | <a name="input_architecture"></a> [architecture](#input\_architecture) | Instruction set architecture of the Fargate task. | `string` | `"x86_64"` | no |
 | <a name="input_cpu"></a> [cpu](#input\_cpu) | Fargate CPU units per agent task (1 vCPU = 1024 CPU units). | `number` | `1024` | no |
 | <a name="input_desired_count"></a> [desired\_count](#input\_desired\_count) | Number of agent tasks to run; each agent handles one run at a time. | `number` | `1` | no |
 | <a name="input_ecr_pull_through_cache"></a> [ecr\_pull\_through\_cache](#input\_ecr\_pull\_through\_cache) | Pull the agent image through an ECR pull through cache for Docker Hub instead of directly from Docker Hub. `credential_arn` is the ARN of a Secrets Manager secret, prefixed with `ecr-pullthroughcache/`, holding Docker Hub credentials. `ecr_repository_prefix` defaults to `name`. | <pre>object({<br/>    enabled               = optional(bool, false)<br/>    credential_arn        = optional(string)<br/>    ecr_repository_prefix = optional(string)<br/>  })</pre> | `{}` | no |
-| <a name="input_env_variables"></a> [env\_variables](#input\_env\_variables) | Additional environment variables for the agent container, e.g. `TFC_AGENT_*` settings. Overrides the module defaults. | `map(string)` | `{}` | no |
-| <a name="input_kms_key_administrator_arns"></a> [kms\_key\_administrator\_arns](#input\_kms\_key\_administrator\_arns) | IAM ARNs allowed to administer the created KMS key; defaults to the role running Terraform. Only used when `kms_key_arn` is not set. | `list(string)` | `[]` | no |
-| <a name="input_kms_key_arn"></a> [kms\_key\_arn](#input\_kms\_key\_arn) | ARN of an existing KMS key to encrypt the agent token secret and CloudWatch log group; if null a key is created. | `string` | `null` | no |
+| <a name="input_kms_key_arn"></a> [kms\_key\_arn](#input\_kms\_key\_arn) | ARN of an existing KMS key to encrypt the agent token secret, CloudWatch log group and ECR cache repository if enabled; if null a key is created using `kms_key_configuration`. | `string` | `null` | no |
+| <a name="input_kms_key_configuration"></a> [kms\_key\_configuration](#input\_kms\_key\_configuration) | Configuration of the KMS key created by this module. Only applicable when `kms_key_arn` is null. `iam_arns_administrator` grants permissions to manage the key (no cryptographic use) and should include the role running Terraform. `name` sets the alias/name of the created key and defaults to `name`. | <pre>object({<br/>    iam_arns_administrator = list(string)<br/>    name                   = optional(string)<br/>  })</pre> | `null` | no |
 | <a name="input_log_retention_days"></a> [log\_retention\_days](#input\_log\_retention\_days) | Retention in days of the agent CloudWatch log group. | `number` | `365` | no |
 | <a name="input_memory"></a> [memory](#input\_memory) | Fargate memory (in MiB) per agent task. | `number` | `2048` | no |
 | <a name="input_name"></a> [name](#input\_name) | Name used for the AWS resources; must be unique per AWS account and region. | `string` | `"tfc-agent"` | no |
@@ -186,7 +197,6 @@ When `kms_key_arn` is set, the key policy must allow the CloudWatch Logs service
 | <a name="input_region"></a> [region](#input\_region) | The AWS region where resources will be created; if omitted the default provider region is used. | `string` | `null` | no |
 | <a name="input_role_policy_documents"></a> [role\_policy\_documents](#input\_role\_policy\_documents) | Additional IAM policy documents (JSON) merged into the agent role policy. This role is also used by Terraform runs on the agent. | `list(string)` | `[]` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | A mapping of tags to assign to the AWS resources. A `tfe-organization` tag with the HCP Terraform organization is always added. | `map(string)` | `{}` | no |
-| <a name="input_tfc_address"></a> [tfc\_address](#input\_tfc\_address) | Address of the HCP Terraform or Terraform Enterprise instance; if null the agent default (https://app.terraform.io) is used. | `string` | `null` | no |
 | <a name="input_tfe_organization"></a> [tfe\_organization](#input\_tfe\_organization) | Name of the HCP Terraform organization | `string` | `null` | no |
 
 ## Outputs

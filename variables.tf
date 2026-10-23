@@ -1,3 +1,9 @@
+variable "agent_env_variables" {
+  type        = map(string)
+  default     = {}
+  description = "Additional environment variables for the agent container, e.g. `TFC_AGENT_*` settings. Overrides the module defaults."
+}
+
 variable "agent_image" {
   type        = string
   default     = "hashicorp/tfc-agent"
@@ -27,6 +33,12 @@ variable "agent_single_execution" {
   description = "Stop the agent after each run so every run starts in a fresh container; ECS replaces the stopped task."
 }
 
+variable "agent_tfc_address" {
+  type        = string
+  default     = null
+  description = "Address of the HCP Terraform or Terraform Enterprise instance; if null the agent default (https://app.terraform.io) is used."
+}
+
 variable "agent_token_secret_arn" {
   type        = string
   default     = null
@@ -47,13 +59,13 @@ variable "agent_token_secret_kms_key_arn" {
 variable "allowed_project_ids" {
   type        = set(string)
   default     = []
-  description = "IDs of the HCP Terraform projects whose workspaces may use the agent pool. Only used when `organization_scoped` is false."
+  description = "IDs of the HCP Terraform projects whose workspaces may use the agent pool. When `organization_scoped` is false at least one project or workspace is required; when it is true this must be empty."
 }
 
 variable "allowed_workspace_ids" {
   type        = set(string)
   default     = []
-  description = "IDs of the HCP Terraform workspaces that may use the agent pool. Only used when `organization_scoped` is false."
+  description = "IDs of the HCP Terraform workspaces that may use the agent pool. When `organization_scoped` is false at least one project or workspace is required; when it is true this must be empty."
 }
 
 variable "architecture" {
@@ -98,9 +110,10 @@ variable "ecr_pull_through_cache" {
     error_message = "When enabled, credential_arn must be the ARN of a Secrets Manager secret whose name starts with \"ecr-pullthroughcache/\"."
   }
 
+  # Checks the prefix that is used, which defaults to name.
   validation {
-    condition     = var.ecr_pull_through_cache.ecr_repository_prefix == null || can(regex("^[a-z0-9][a-z0-9._/-]{1,29}$", var.ecr_pull_through_cache.ecr_repository_prefix))
-    error_message = "ecr_repository_prefix must be 2-30 lowercase characters: letters, numbers, \".\", \"_\", \"-\" or \"/\"."
+    condition     = !var.ecr_pull_through_cache.enabled || can(regex("^[a-z0-9][a-z0-9._/-]{1,29}$", coalesce(var.ecr_pull_through_cache.ecr_repository_prefix, var.name)))
+    error_message = "When enabled, ecr_repository_prefix, which defaults to name, must be 2-30 lowercase characters: letters, numbers, \".\", \"_\", \"-\" or \"/\"."
   }
 
   validation {
@@ -109,22 +122,29 @@ variable "ecr_pull_through_cache" {
   }
 }
 
-variable "env_variables" {
-  type        = map(string)
-  default     = {}
-  description = "Additional environment variables for the agent container, e.g. `TFC_AGENT_*` settings. Overrides the module defaults."
-}
-
-variable "kms_key_administrator_arns" {
-  type        = list(string)
-  default     = []
-  description = "IAM ARNs allowed to administer the created KMS key; defaults to the role running Terraform. Only used when `kms_key_arn` is not set."
-}
-
 variable "kms_key_arn" {
   type        = string
   default     = null
-  description = "ARN of an existing KMS key to encrypt the agent token secret and CloudWatch log group; if null a key is created."
+  description = "ARN of an existing KMS key to encrypt the agent token secret, CloudWatch log group and ECR cache repository if enabled; if null a key is created using `kms_key_configuration`."
+}
+
+variable "kms_key_configuration" {
+  type = object({
+    iam_arns_administrator = list(string)
+    name                   = optional(string)
+  })
+  default     = null
+  description = "Configuration of the KMS key created by this module. Only applicable when `kms_key_arn` is null. `iam_arns_administrator` grants permissions to manage the key (no cryptographic use) and should include the role running Terraform. `name` sets the alias/name of the created key and defaults to `name`."
+
+  validation {
+    condition     = var.kms_key_arn == null || var.kms_key_configuration == null
+    error_message = "'kms_key_arn' and 'kms_key_configuration' are mutually exclusive; provide 'kms_key_arn' to use an existing key, or 'kms_key_configuration' to have the module create one, but not both."
+  }
+
+  validation {
+    condition     = var.kms_key_arn != null || try(length(var.kms_key_configuration.iam_arns_administrator) > 0, false)
+    error_message = "When 'kms_key_arn' is not provided, 'kms_key_configuration.iam_arns_administrator' must contain at least one IAM ARN to administer the KMS key created by this module."
+  }
 }
 
 variable "log_retention_days" {
@@ -143,12 +163,29 @@ variable "name" {
   type        = string
   default     = "tfc-agent"
   description = "Name used for the AWS resources; must be unique per AWS account and region."
+
+  # The ECS resource names allow letters, numbers, hyphens and underscores, and the IAM role
+  # TaskExecutionRole-<name> limits the length to 46 characters.
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9][a-zA-Z0-9_-]{0,45}$", var.name))
+    error_message = "name must be 1-46 characters: letters, numbers, \"-\" or \"_\", starting with a letter or number."
+  }
 }
 
 variable "organization_scoped" {
   type        = bool
   default     = false
   description = "Allow all workspaces in the organization to use the agent pool instead of only the allowed projects and workspaces."
+
+  validation {
+    condition     = var.organization_scoped || length(var.allowed_project_ids) > 0 || length(var.allowed_workspace_ids) > 0
+    error_message = "When organization_scoped is false, set allowed_project_ids and/or allowed_workspace_ids, otherwise no workspace can use the agent pool."
+  }
+
+  validation {
+    condition     = !var.organization_scoped || (length(var.allowed_project_ids) == 0 && length(var.allowed_workspace_ids) == 0)
+    error_message = "When organization_scoped is true, every workspace can use the agent pool, so allowed_project_ids and allowed_workspace_ids must be empty."
+  }
 }
 
 variable "permissions_boundary" {
@@ -171,7 +208,12 @@ variable "role_policy_documents" {
 
 variable "subnet_ids" {
   type        = list(string)
-  description = "IDs of the private subnets to run the agent tasks in."
+  description = "IDs of the private subnets to run the agent tasks in; they must all be in the same VPC, which is used for the agent tasks."
+
+  validation {
+    condition     = length(var.subnet_ids) > 0
+    error_message = "At least one subnet ID must be provided."
+  }
 }
 
 variable "tags" {
@@ -180,19 +222,8 @@ variable "tags" {
   description = "A mapping of tags to assign to the AWS resources. A `tfe-organization` tag with the HCP Terraform organization is always added."
 }
 
-variable "tfc_address" {
-  type        = string
-  default     = null
-  description = "Address of the HCP Terraform or Terraform Enterprise instance; if null the agent default (https://app.terraform.io) is used."
-}
-
 variable "tfe_organization" {
   type        = string
   default     = null
   description = "Name of the HCP Terraform organization"
-}
-
-variable "vpc_id" {
-  type        = string
-  description = "ID of the VPC to run the agent tasks in."
 }

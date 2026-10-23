@@ -1,10 +1,10 @@
 locals {
   account_id  = data.aws_caller_identity.current.account_id
   agent_name  = "${var.name}-agent"
-  create_kms  = var.kms_key_arn == null
-  kms_key_arn = local.create_kms ? module.kms[0].arn : var.kms_key_arn
+  kms_key_arn = var.kms_key_arn != null ? var.kms_key_arn : module.kms_key[0].arn
   pool_name   = "${var.name}-pool"
   region      = data.aws_region.current.region
+  vpc_id      = data.aws_subnet.selected.vpc_id
 
   # Created by the mcaf-fargate module; needed upfront in the KMS key policy.
   log_group_name = "/ecs/${var.name}"
@@ -30,15 +30,15 @@ locals {
   create_agent_token     = var.agent_token_secret_arn == null
   agent_token_secret_arn = local.create_agent_token ? aws_secretsmanager_secret.default[0].arn : var.agent_token_secret_arn
 
-  env_variables = merge(
+  agent_env_variables = merge(
     {
       TFC_AGENT_AUTO_UPDATE = "disabled"
       TFC_AGENT_LOG_LEVEL   = var.agent_log_level
       TFC_AGENT_NAME        = local.agent_name
       TFC_AGENT_SINGLE      = tostring(var.agent_single_execution)
     },
-    var.tfc_address != null ? { TFC_ADDRESS = var.tfc_address } : {},
-    var.env_variables,
+    var.agent_tfc_address != null ? { TFC_ADDRESS = var.agent_tfc_address } : {},
+    var.agent_env_variables,
   )
 }
 
@@ -46,6 +46,30 @@ data "aws_caller_identity" "current" {}
 
 data "aws_region" "current" {
   region = var.region
+}
+
+# The VPC is derived from the subnets rather than passed in separately; all subnets must be in it.
+data "aws_subnet" "selected" {
+  region = var.region
+  id     = var.subnet_ids[0]
+}
+
+# Only read for its postcondition: Terraform reads data sources even when nothing references them.
+# tflint-ignore: terraform_unused_declarations
+data "aws_subnets" "vpc" {
+  region = var.region
+
+  filter {
+    name   = "vpc-id"
+    values = [local.vpc_id]
+  }
+
+  lifecycle {
+    postcondition {
+      condition     = length(setsubtract(var.subnet_ids, self.ids)) == 0
+      error_message = "All subnet_ids must be in the same VPC."
+    }
+  }
 }
 
 ################################################################################
@@ -100,28 +124,13 @@ resource "aws_secretsmanager_secret_version" "default" {
 }
 
 ################################################################################
-# KMS key (agent token secret & CloudWatch log group)
+# KMS key (agent token secret, CloudWatch log group & ECR cache repository)
 ################################################################################
 
-data "aws_iam_session_context" "current" {
-  count = local.create_kms && length(var.kms_key_administrator_arns) == 0 ? 1 : 0
-
-  arn = data.aws_caller_identity.current.arn
-}
-
+# Principals in the account can only use the key through the services the module uses it with,
+# and only when their IAM policies allow it, instead of the key delegating all of KMS to IAM.
 data "aws_iam_policy_document" "kms_key_policy" {
-  count = local.create_kms ? 1 : 0
-
-  statement {
-    sid       = "AllowIamDelegation"
-    actions   = ["kms:*"]
-    resources = ["*"]
-
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::${local.account_id}:root"]
-    }
-  }
+  count = var.kms_key_arn == null ? 1 : 0
 
   statement {
     sid = "AllowCloudWatchLogs"
@@ -132,6 +141,7 @@ data "aws_iam_policy_document" "kms_key_policy" {
       "kms:GenerateDataKey*",
       "kms:ReEncrypt*",
     ]
+    effect    = "Allow"
     resources = ["*"]
 
     principals {
@@ -145,21 +155,65 @@ data "aws_iam_policy_document" "kms_key_policy" {
       values   = ["arn:aws:logs:${local.region}:${local.account_id}:log-group:${local.log_group_name}"]
     }
   }
+
+  # Terraform stores the agent token and the agent role reads it through Secrets Manager.
+  statement {
+    sid = "AllowViaSecretsManager"
+    actions = [
+      "kms:Decrypt",
+      "kms:GenerateDataKey*",
+    ]
+    effect    = "Allow"
+    resources = ["*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${local.account_id}:root"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["secretsmanager.${local.region}.amazonaws.com"]
+    }
+  }
+
+  # Creating the encrypted cache repository lets ECR create a grant for the key.
+  statement {
+    sid = "AllowViaEcr"
+    actions = [
+      "kms:CreateGrant",
+      "kms:RetireGrant",
+    ]
+    effect    = "Allow"
+    resources = ["*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${local.account_id}:root"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["ecr.${local.region}.amazonaws.com"]
+    }
+  }
 }
 
-module "kms" {
-  count = local.create_kms ? 1 : 0
+module "kms_key" {
+  count = var.kms_key_arn == null ? 1 : 0
 
   source  = "schubergphilis-ep/mcaf-kms/aws"
   version = "~> 3.0.0"
 
-  name        = var.name
-  description = "KMS key used by the ${var.name} HCP Terraform agent"
   region      = var.region
+  name        = coalesce(var.kms_key_configuration.name, var.name)
+  description = "KMS key used by the ${var.name} HCP Terraform agent"
   tags        = local.tags
 
   default_policy = {
-    iam_arns_administrator  = length(var.kms_key_administrator_arns) > 0 ? var.kms_key_administrator_arns : [data.aws_iam_session_context.current[0].issuer_arn]
+    iam_arns_administrator  = var.kms_key_configuration.iam_arns_administrator
     source_policy_documents = [data.aws_iam_policy_document.kms_key_policy[0].json]
   }
 }
@@ -248,7 +302,7 @@ module "fargate" {
   cpu                  = var.cpu
   desired_count        = var.desired_count
   ecs_subnet_ids       = var.subnet_ids
-  environment          = local.env_variables
+  environment          = local.agent_env_variables
   image                = local.image
   kms_key_id           = local.kms_key_arn
   log_retention_days   = var.log_retention_days
@@ -257,7 +311,7 @@ module "fargate" {
   region               = var.region
   role_policy          = data.aws_iam_policy_document.role_policy.json
   tags                 = local.tags
-  vpc_id               = var.vpc_id
+  vpc_id               = local.vpc_id
 
   # The agent writes Terraform binaries, providers and run data to its root filesystem and
   # mcaf-fargate cannot mount writable ephemeral volumes. See the README for policy impact.
