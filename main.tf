@@ -229,7 +229,7 @@ module "ecr_pull_through_cache" {
   count = var.ecr_pull_through_cache.enabled ? 1 : 0
 
   source  = "schubergphilis-ep/mcaf-ecr/aws//modules/pull-through-cache"
-  version = "~> 2.0.0"
+  version = "~> 2.1.0"
 
   create_ecr_repository_creation_role = false
   image_tag_mutability                = "MUTABLE" # cached tags are refreshed from Docker Hub
@@ -252,7 +252,7 @@ module "ecr" {
   count = var.ecr_pull_through_cache.enabled ? 1 : 0
 
   source  = "schubergphilis-ep/mcaf-ecr/aws"
-  version = "~> 2.0.0"
+  version = "~> 2.1.0"
 
   force_delete         = true # cached images can be pulled again from Docker Hub
   image_tag_mutability = "MUTABLE"

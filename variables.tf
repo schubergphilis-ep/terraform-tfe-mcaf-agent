@@ -115,11 +115,6 @@ variable "ecr_pull_through_cache" {
     condition     = !var.ecr_pull_through_cache.enabled || can(regex("^[a-z0-9][a-z0-9._/-]{1,29}$", coalesce(var.ecr_pull_through_cache.ecr_repository_prefix, var.name)))
     error_message = "When enabled, ecr_repository_prefix, which defaults to name, must be 2-30 lowercase characters: letters, numbers, \".\", \"_\", \"-\" or \"/\"."
   }
-
-  validation {
-    condition     = !var.ecr_pull_through_cache.enabled || var.region == null
-    error_message = "The ECR pull through cache is created in the provider region, as the mcaf-ecr pull-through-cache module does not support the region argument; unset region or use a provider for that region."
-  }
 }
 
 variable "kms_key_arn" {
