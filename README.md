@@ -21,7 +21,7 @@ provider "tfe" {
 
 module "tfc_agent" {
   source  = "schubergphilis-ep/mcaf-agent/tfe"
-  version = "~> 1.0"
+  version = "~> 0.1"
 
   allowed_project_ids = ["prj-AbCdEfGhIjKlMnOp"]
   subnet_ids          = data.aws_subnets.private.ids
